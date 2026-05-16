@@ -1,22 +1,22 @@
 /**
  * Vehicle Maintenance Scheduler
  * ─────────────────────────────
- * Fetches depots and their maintenance tasks from the evaluation service,
- * then uses a 0/1 Knapsack DP algorithm to select the optimal set of tasks
- * that maximises total operational impact within the daily mechanic-hour budget.
+ * Fetches depots and vehicles from the evaluation service, then uses
+ * a 0/1 Knapsack DP algorithm to select the optimal set of tasks that
+ * maximises total Impact within each depot's MechanicHours budget.
  *
- * API endpoints used:
- *   GET  /evaluation-service/depots
- *   GET  /evaluation-service/depots/:depotId/tasks
- *
- * Logging is done via the shared logging_middleware package.
+ * APIs used:
+ *   GET /evaluation-service/depots   → { depots: [{ ID, MechanicHours }] }
+ *   GET /evaluation-service/vehicles → { vehicles: [{ TaskID, Duration, Impact }] }
  */
+
+require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 
 const { Log } = require("../logging_middleware");
 
 const BASE_URL = "http://4.224.186.213/evaluation-service";
 
-// ─── HTTP helper ─────────────────────────────────────────────────────────────
+// ─── HTTP helper ──────────────────────────────────────────────────────────────
 
 function getAuthHeaders() {
   const token = process.env.LOG_API_TOKEN || process.env.AUTH_TOKEN;
@@ -28,42 +28,37 @@ function getAuthHeaders() {
 async function apiFetch(path) {
   const url = `${BASE_URL}${path}`;
   const response = await fetch(url, { headers: getAuthHeaders() });
-
   if (!response.ok) {
-    throw new Error(`API error ${response.status} for ${url}`);
+    throw new Error(`API error ${response.status} for GET ${url}`);
   }
-
   return response.json();
 }
 
-// ─── Knapsack algorithm ───────────────────────────────────────────────────────
+// ─── 0/1 Knapsack (space-optimised DP) ───────────────────────────────────────
 
 /**
- * 0/1 Knapsack — O(n × W) dynamic programming.
- *
- * @param {Array<{id, duration, importance}>} tasks
- * @param {number} capacity  - Total mechanic-hours available
- * @returns {{ selectedTasks: Array, totalImportance: number, totalDuration: number }}
+ * @param {Array<{ taskId, duration, impact }>} tasks
+ * @param {number} capacity  - MechanicHours available for this depot
+ * @returns {{ selectedTasks, totalImpact, totalDuration }}
  */
 function knapsack(tasks, capacity) {
   const n = tasks.length;
-  // Use 1-D DP array (space-optimised)
   const dp = new Array(capacity + 1).fill(0);
 
+  // Build DP table
   for (let i = 0; i < n; i++) {
-    const { duration, importance } = tasks[i];
-    // Traverse backwards to avoid using the same item twice
+    const { duration, impact } = tasks[i];
     for (let w = capacity; w >= duration; w--) {
-      dp[w] = Math.max(dp[w], dp[w - duration] + importance);
+      dp[w] = Math.max(dp[w], dp[w - duration] + impact);
     }
   }
 
-  // Back-track to find selected tasks
+  // Back-track to find selected items
   const selected = [];
   let w = capacity;
   for (let i = n - 1; i >= 0; i--) {
-    const { duration, importance } = tasks[i];
-    if (w >= duration && dp[w] === dp[w - duration] + importance) {
+    const { duration, impact } = tasks[i];
+    if (w >= duration && dp[w] === dp[w - duration] + impact) {
       selected.push(tasks[i]);
       w -= duration;
     }
@@ -71,120 +66,110 @@ function knapsack(tasks, capacity) {
 
   return {
     selectedTasks: selected.reverse(),
-    totalImportance: dp[capacity],
+    totalImpact: dp[capacity],
     totalDuration: selected.reduce((sum, t) => sum + t.duration, 0),
   };
 }
 
-// ─── Core scheduler ───────────────────────────────────────────────────────────
+// ─── Data fetching ────────────────────────────────────────────────────────────
 
 async function fetchDepots() {
   await Log("backend", "info", "service", "Fetching depot list from evaluation API");
   try {
     const data = await apiFetch("/depots");
-    await Log(
-      "backend",
-      "info",
-      "service",
-      `Retrieved ${data.depots.length} depots from the API`
-    );
-    return data.depots;
+    await Log("backend", "info", "service", `Retrieved ${data.depots.length} depots`);
+    return data.depots; // [{ ID, MechanicHours }]
   } catch (err) {
     await Log("backend", "error", "service", `Failed to fetch depots: ${err.message}`);
     throw err;
   }
 }
 
-async function fetchTasksForDepot(depotId) {
-  await Log(
-    "backend",
-    "debug",
-    "repository",
-    `Fetching maintenance tasks for depot ID ${depotId}`
-  );
+async function fetchVehicles() {
+  await Log("backend", "info", "repository", "Fetching vehicle task list from evaluation API");
   try {
-    const data = await apiFetch(`/depots/${depotId}/tasks`);
-    const tasks = data.tasks || [];
+    const data = await apiFetch("/vehicles");
     await Log(
       "backend",
-      "debug",
+      "info",
       "repository",
-      `Depot ${depotId}: retrieved ${tasks.length} tasks`
+      `Retrieved ${data.vehicles.length} vehicle tasks`
     );
-    return tasks;
+    // Normalise to internal shape
+    return data.vehicles.map((v) => ({
+      taskId: v.TaskID,
+      duration: v.Duration,
+      impact: v.Impact,
+    }));
   } catch (err) {
-    await Log(
-      "backend",
-      "error",
-      "repository",
-      `Failed to fetch tasks for depot ${depotId}: ${err.message}`
-    );
+    await Log("backend", "error", "repository", `Failed to fetch vehicles: ${err.message}`);
     throw err;
   }
 }
 
-async function scheduleDepot(depot) {
+// ─── Per-depot scheduling ─────────────────────────────────────────────────────
+
+async function scheduleDepot(depot, vehicles) {
   const { ID: depotId, MechanicHours: capacity } = depot;
 
   await Log(
     "backend",
     "info",
     "domain",
-    `Scheduling depot ${depotId} — available hours: ${capacity}`
+    `Scheduling depot ${depotId} — budget: ${capacity}h, tasks available: ${vehicles.length}`
   );
 
-  const rawTasks = await fetchTasksForDepot(depotId);
-
-  if (rawTasks.length === 0) {
-    await Log("backend", "warn", "domain", `Depot ${depotId} has no tasks to schedule`);
-    return { depotId, capacity, selectedTasks: [], totalImportance: 0, totalDuration: 0 };
+  if (vehicles.length === 0) {
+    await Log("backend", "warn", "domain", `Depot ${depotId}: no vehicle tasks available`);
+    return { depotId, capacity, selectedTasks: [], totalImpact: 0, totalDuration: 0 };
   }
-
-  // Normalise field names from the API response
-  const tasks = rawTasks.map((t) => ({
-    id: t.ID ?? t.id,
-    duration: t.Duration ?? t.duration ?? t.ServiceDuration,
-    importance: t.ImportanceScore ?? t.importance ?? t.OperationalImpact,
-  }));
 
   await Log(
     "backend",
     "debug",
     "domain",
-    `Depot ${depotId}: running knapsack on ${tasks.length} tasks with capacity ${capacity}h`
+    `Depot ${depotId}: running 0/1 knapsack DP with capacity=${capacity}h`
   );
 
-  const result = knapsack(tasks, capacity);
+  const result = knapsack(vehicles, capacity);
 
   await Log(
     "backend",
     "info",
     "domain",
     `Depot ${depotId}: selected ${result.selectedTasks.length} tasks — ` +
-      `importance=${result.totalImportance}, hours used=${result.totalDuration}/${capacity}`
+      `impact=${result.totalImpact}, hours used=${result.totalDuration}/${capacity}`
   );
 
   return { depotId, capacity, ...result };
 }
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
+// ─── Main scheduler ───────────────────────────────────────────────────────────
 
 async function runScheduler() {
   await Log("backend", "info", "service", "Vehicle Maintenance Scheduler started");
 
-  let depots;
+  // Fetch depots and vehicles in parallel
+  let depots, vehicles;
   try {
-    depots = await fetchDepots();
-  } catch {
-    await Log("backend", "fatal", "service", "Cannot proceed — depot fetch failed");
-    process.exit(1);
+    [depots, vehicles] = await Promise.all([fetchDepots(), fetchVehicles()]);
+  } catch (err) {
+    await Log("backend", "fatal", "service", `Cannot proceed — data fetch failed: ${err.message}`);
+    throw err;
   }
+
+  await Log(
+    "backend",
+    "info",
+    "service",
+    `Processing ${depots.length} depots with ${vehicles.length} vehicle tasks`
+  );
 
   const results = [];
 
   for (const depot of depots) {
     try {
-      const schedule = await scheduleDepot(depot);
+      const schedule = await scheduleDepot(depot, vehicles);
       results.push(schedule);
     } catch (err) {
       await Log(
@@ -196,38 +181,37 @@ async function runScheduler() {
     }
   }
 
-  // ── Print summary ────────────────────────────────────────────────────────
-  console.log("\n╔══════════════════════════════════════════════════════════╗");
-  console.log("║        Vehicle Maintenance Scheduler — Results            ║");
-  console.log("╚══════════════════════════════════════════════════════════╝\n");
+  // ── Print summary table ──────────────────────────────────────────────────
+  console.log("\n╔══════════════════════════════════════════════════════════════╗");
+  console.log("║       Vehicle Maintenance Scheduler — Results                 ║");
+  console.log("╚══════════════════════════════════════════════════════════════╝\n");
 
   for (const r of results) {
     console.log(`Depot ${r.depotId}  (Budget: ${r.capacity}h)`);
-    console.log(
-      `  ✔ Selected tasks : ${r.selectedTasks.map((t) => t.id).join(", ") || "none"}`
-    );
-    console.log(`  ✔ Hours used     : ${r.totalDuration} / ${r.capacity}`);
-    console.log(`  ✔ Total score    : ${r.totalImportance}`);
+    console.log(`  Selected tasks : ${r.selectedTasks.length}`);
+    console.log(`  Task IDs       : ${r.selectedTasks.map((t) => t.taskId).join(", ") || "none"}`);
+    console.log(`  Hours used     : ${r.totalDuration} / ${r.capacity}`);
+    console.log(`  Total impact   : ${r.totalImpact}`);
     console.log();
   }
 
-  const grandTotal = results.reduce((s, r) => s + r.totalImportance, 0);
-  console.log(`Grand total importance score across all depots: ${grandTotal}`);
+  const grandTotal = results.reduce((s, r) => s + r.totalImpact, 0);
+  console.log(`Grand total impact score across all depots: ${grandTotal}\n`);
 
   await Log(
     "backend",
     "info",
     "service",
-    `Scheduler completed. Grand total importance score: ${grandTotal}`
+    `Scheduler completed. Grand total impact: ${grandTotal}`
   );
 
   return results;
 }
 
-// Run if called directly
+// ─── Run directly ─────────────────────────────────────────────────────────────
 if (require.main === module) {
   runScheduler().catch(async (err) => {
-    await Log("backend", "fatal", "service", `Unhandled scheduler error: ${err.message}`);
+    await Log("backend", "fatal", "service", `Unhandled error: ${err.message}`);
     console.error(err);
     process.exit(1);
   });
