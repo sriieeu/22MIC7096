@@ -4,6 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
+    "schedule": "node vehicle_matienance/scheduler.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

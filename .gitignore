@@ -6,12 +6,11 @@ yarn-error.log*
 package-lock.json
 yarn.lock
 
-# Environment variables
 .env
 .env.local
 .env.*.local
 
-# IDE and editor files
+
 .vscode/
 .idea/
 *.swp
@@ -21,7 +20,7 @@ yarn.lock
 *.sublime-project
 *.sublime-workspace
 
-# Build and dist directories
+
 dist/
 build/
 .next/
