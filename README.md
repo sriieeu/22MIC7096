@@ -1,6 +1,5 @@
 # 22MIC7096 project
 
-this is my backend project for college.
 i made 2 servers and a logger.
 
 ## how to run
