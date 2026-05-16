@@ -8,8 +8,6 @@ i made 2 servers and a logger.
 3. node vehicle_matienance_scheduler/index.js
 
 ## what i did
-- made a logger to send logs
 - made notification api with priority
 - made vehicle scheduler
 
-thank you.
