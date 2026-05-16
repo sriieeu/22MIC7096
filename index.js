@@ -6,6 +6,8 @@
  *  - Vehicle Maintenance Scheduler (vehicle_matienance/)
  */
 
+require("dotenv").config();
+
 const express = require("express");
 const { Log } = require("./logging_middleware");
 const { runScheduler } = require("./vehicle_matienance/scheduler");

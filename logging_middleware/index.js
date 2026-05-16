@@ -4,6 +4,8 @@
  * Usage: Log(stack, level, package, message)
  */
 
+require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
+
 const LOG_API_URL = "http://4.224.186.213/evaluation-service/logs";
 
 const ALLOWED_STACKS = ["backend", "frontend"];
