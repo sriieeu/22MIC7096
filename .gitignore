@@ -20,7 +20,8 @@ yarn.lock
 *.sublime-project
 *.sublime-workspace
 
-
+index.js
+package.json
 dist/
 build/
 .next/
